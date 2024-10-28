@@ -49,6 +49,20 @@ class ViewController: UIViewController {
         
         // start the capture session and get processing a face!
         self.session?.startRunning()
+        
+        setupSlider()
+    }
+    
+    func setupSlider() {
+        // Create the UISlider
+        gazeSlider = UISlider(frame: CGRect(x: 20, y: view.bounds.height - 100, width: view.bounds.width - 40, height: 30))
+        gazeSlider.minimumValue = 0.0 // Set the minimum value
+        gazeSlider.maximumValue = 1.0 // Set the maximum value
+        gazeSlider.value = 0.5 // Start at the middle
+        gazeSlider.isContinuous = true //
+
+        // Add the slider to the main view
+        view.addSubview(gazeSlider)
     }
     
     override func didReceiveMemoryWarning() {
@@ -99,8 +113,8 @@ class ViewController: UIViewController {
         // see if we can get any face features, this will fail if no faces detected
         // try to save the face observations to a results vector
         guard let faceDetectionRequest = request as? VNDetectFaceRectanglesRequest,
-            let results = faceDetectionRequest.results as? [VNFaceObservation] else {
-                return
+              let results = faceDetectionRequest.results as? [VNFaceObservation] else {
+            return
         }
         
         if !results.isEmpty{
@@ -136,7 +150,7 @@ class ViewController: UIViewController {
     // Handle delegate method callback on receiving a sample buffer.
     // This is where we get the pixel buffer from the camera and need to
     // generate the vision requests
-    public func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) 
+    public func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection)
     {
         
         var requestHandlerOptions: [VNImageOption: AnyObject] = [:]
@@ -161,7 +175,7 @@ class ViewController: UIViewController {
             print("Tracking request array not setup, aborting.")
             return
         }
-
+        
         
         // check to see if the tracking request is empty (no face currently detected)
         // if it is empty,
@@ -195,14 +209,14 @@ class ViewController: UIViewController {
                 print("Face object lost, resetting detection...")
                 return
             }
-
+            
             self.performLandmarkDetection(newTrackingRequests: newTrackingRequests,
                                           pixelBuffer: pixelBuffer,
                                           exifOrientation: exifOrientation,
                                           requestHandlerOptions: requestHandlerOptions)
-  
+            
         }
-    
+        
         
     }
     
@@ -261,7 +275,7 @@ class ViewController: UIViewController {
                         trackingRequest.inputObservation = observation
                     }
                     else {
-
+                        
                         // once below thresh, make it last frame
                         // this will stop the processing of tracker
                         trackingRequest.isLastFrame = true
@@ -318,32 +332,107 @@ class ViewController: UIViewController {
             }
         }
     }
-    
+
     
     // Interpret the output of our facial landmark detector
     // this code is called upon succesful completion of landmark detection
-    func landmarksCompletionHandler(request:VNRequest, error:Error?){
-        
-        if error != nil {
-            print("FaceLandmarks error: \(String(describing: error)).")
-        }
-        
-        // any landmarks found that we can display? If not, return
-        guard let landmarksRequest = request as? VNDetectFaceLandmarksRequest,
-              let results = landmarksRequest.results as? [VNFaceObservation] else {
-            return
-        }
-        
-        // Perform all UI updates (drawing) on the main queue, not the background queue on which this handler is being called.
+    
+    // Properties to store extrema, blink detection, and gaze direction
+    var leftEyeX: (min: Float, max: Float) = (Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude)
+    var leftEyeY: (min: Float, max: Float) = (Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude)
+    var isBlinking: Bool = false // Tracks whether a blink is detected
+    var gazeDirection: Float = 0.5 // Degree of gaze direction (0.0 = left, 1.0 = right).. set to middle for initial launch
+    var gazeSlider: UISlider! // Slider for gaze direction
+    
+    // Thresholds for blink detection
+    let blinkThreshold: Float = 0.05 // Y-difference threshold for detecting blinks
+    let openEyeMinDiff: Float = 0.10 // Minimum Y-difference indicating an open eye
+    
+    // Inside the landmarksCompletionHandler function
+    func landmarksCompletionHandler(request: VNRequest, error: Error?) {
+            if error != nil {
+                print("FaceLandmarks error: \(String(describing: error)).")
+                return
+            }
+            
+            // Check if landmarks are found
+            guard let landmarksRequest = request as? VNDetectFaceLandmarksRequest,
+                  let results = landmarksRequest.results as? [VNFaceObservation] else {
+                return
+            }
+            
+            // Iterate through each face observation
+            for faceObservation in results {
+                // Access landmarks using 'if let'
+                if let landmarks = faceObservation.landmarks {
+                    
+                    // Part One: Calculate Extrema for X and Y Directions
+                    if let lePoints = landmarks.leftEye?.normalizedPoints {
+                        // Explanation of normalizedPoints:
+                        // 'normalizedPoints' represent coordinates relative to the face's bounding box, scaled between 0.0 and 1.0. The bounding box is a rectangular area that surrounds the detected face in an image.
+
+                        // Calculate the minimum and maximum values for the x and y directions
+                        let minX = lePoints.map { $0.x }.min() ?? 0
+                        let maxX = lePoints.map { $0.x }.max() ?? 0
+                        let minY = lePoints.map { $0.y }.min() ?? 0
+                        let maxY = lePoints.map { $0.y }.max() ?? 0
+
+                        // Update the extrema across frames
+                        leftEyeX.min = min(leftEyeX.min, Float(minX))
+                        leftEyeX.max = max(leftEyeX.max, Float(maxX))
+                        leftEyeY.min = min(leftEyeY.min, Float(minY))
+                        leftEyeY.max = max(leftEyeY.max, Float(maxY))
+
+                        // Part Two: Calculate Y-Difference for Blink Detection
+                        let currentYDiff = Float(maxY - minY)
+                        let greatestYDiff = leftEyeY.max - leftEyeY.min
+
+                        // Print the y-differences
+                        print("Current Y-Difference: \(currentYDiff), Greatest Y-Difference: \(greatestYDiff)")
+
+                        // Blink Detection Algorithm:
+                        // If the vertical distance of the left eye is less than the predefined blinkThreshold, it indicates that the eye is closed and the isBlinking variable will be set to true.
+                        // If the distance is greater than or equal to the threshold, the eye is most likely open and is blinking will be set to false.
+                        if currentYDiff < blinkThreshold {
+                            isBlinking = true
+                            print("Blink detected!")
+                        } else if currentYDiff >= blinkThreshold {
+                            isBlinking = false
+                        }
+                    }
+
+                    // Part Three: Calculate Gaze Direction
+                    if !isBlinking,
+                       let lePoints = landmarks.leftEye?.normalizedPoints,
+                       let ppPoints = landmarks.leftPupil?.normalizedPoints {
+
+                        // Calculate the minimum x-values for the left eye and pupil
+                        let minEyeX = lePoints.map { $0.x }.min() ?? 0
+                        let minPupilX = ppPoints.map { $0.x }.min() ?? 0
+
+                        // Calculate the gaze direction based on pupil position and leftEyeX range
+                        let xDifference = minPupilX - minEyeX
+                        print("Gaze Related Quantity: \(xDifference)")
+
+                        // Normalize the gaze direction between 0.0 and 1.0
+                        gazeDirection = (Float(minPupilX) - leftEyeX.min) / (leftEyeX.max - leftEyeX.min)
+                        gazeDirection = max(0.0, min(1.0, gazeDirection))
+
+                        // Update the slider to reflect gaze direction
+                        DispatchQueue.main.async {
+                            self.gazeSlider.value = self.gazeDirection
+                        }
+
+                    }
+                }
+            }
+
+        // Perform all UI updates (drawing) on the main queue
         DispatchQueue.main.async {
-            // draw the landmarks using core animation layers
             self.drawFaceObservations(results)
         }
     }
-    
-    
 }
-
 
 // MARK: Helper Methods
 extension UIViewController{
